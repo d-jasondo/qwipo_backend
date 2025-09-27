@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: qwipo-api
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      # Use Postgres in production. Replace with your connection string or attach a Render PostgreSQL.
+      # - key: DATABASE_URL
+      #   value: postgresql://USER:PASSWORD@HOST:5432/DBNAME
+      # For quick smoke tests only (ephemeral storage):
+      # - key: DATABASE_URL
+      #   value: sqlite:////opt/render/project/src/qwipo.db

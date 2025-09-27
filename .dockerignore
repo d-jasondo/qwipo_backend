@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+
+# Git
+.git/
+.gitignore
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Build
+build/
+dist/
+
+# DB (mount a volume in production instead)
+qwipo.db

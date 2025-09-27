@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+
+# IDE/OS
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db
+
+# Build
+build/
+dist/
+*.log
+
+# Local DB files
+qwipo.db
+*.sqlite
+*.sqlite3
+
+# Node (if any frontend is inside this repo)
+node_modules/
