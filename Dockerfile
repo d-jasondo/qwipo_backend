@@ -1,14 +1,10 @@
 # Production-ready Dockerfile for Qwipo B2B API
 FROM python:3.11-slim
 
-# System deps
+# System deps (minimal). Heavy BLAS/LAPACK/Fortran build deps are not needed because
+# NumPy/SciPy wheels bundle OpenBLAS on Linux. This avoids apt errors on slim images.
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    gfortran \
-    libatlas-base-dev \
-    libopenblas-dev \
-    liblapack-dev \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,10 +21,14 @@ COPY . .
 ENV PORT=8000 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 # Expose port
 EXPOSE 8000
 
-# Start with Gunicorn + Uvicorn worker (bind to PORT env var)
-CMD ["bash", "-lc", "gunicorn main:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8000} --timeout 180"]
+# Start a lightweight single-process Uvicorn server (good for free tier)
+CMD ["bash", "-lc", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --log-level info"]

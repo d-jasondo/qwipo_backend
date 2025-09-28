@@ -8,9 +8,7 @@ services:
     envVars:
       - key: PORT
         value: 10000
-      # Use Postgres in production. Replace with your connection string or attach a Render PostgreSQL.
-      # - key: DATABASE_URL
-      #   value: postgresql://USER:PASSWORD@HOST:5432/DBNAME
-      # For quick smoke tests only (ephemeral storage):
-      # - key: DATABASE_URL
-      #   value: sqlite:////opt/render/project/src/qwipo.db
+      # Note: Set DATABASE_URL in the Render dashboard (Settings > Environment)
+      # Do not commit secrets in this file.
+      # Optional: enable enhanced AI features if you have an API key
+      # - key: OPENAI_API_KEY

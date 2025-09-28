@@ -4,19 +4,49 @@ from models import Base
 import os
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
+import logging
 
 # Load .env file if present
 load_dotenv()
 
-# Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./qwipo.db")
+# Setup logger
+logger = logging.getLogger(__name__)
 
-# For PostgreSQL (production)
-# DATABASE_URL = f"postgresql://{username}:{quote_plus(password)}@{host}:{port}/{database}"
+# Resolve and normalize database URL from environment
+def _resolve_database_url() -> str:
+    # Prefer DATABASE_URL, then DATABASE_URL_INTERNAL (Render Postgres internal URL)
+    raw_url = os.getenv("DATABASE_URL") or os.getenv("DATABASE_URL_INTERNAL")
 
+    # Default to a file inside the container. On Render Docker, the writable path is
+    # typically /opt/render/project/src
+    render_sqlite_path = "/opt/render/project/src/qwipo.db"
+    default_sqlite = (
+        f"sqlite:////{render_sqlite_path.lstrip('/')}"
+        if (os.getenv("RENDER") or os.path.exists("/opt/render/project/src"))
+        else "sqlite:///./qwipo.db"
+    )
+
+    if not raw_url:
+        logger.warning("DATABASE_URL not set; falling back to SQLite at %s", default_sqlite)
+        return default_sqlite
+
+    url = raw_url.strip().strip('"').strip("'")
+
+    # Normalize legacy postgres scheme to SQLAlchemy's expected scheme
+    if url.startswith("postgres://"):
+        normalized = "postgresql://" + url[len("postgres://"):]
+        logger.info("Normalized DATABASE_URL scheme from postgres:// to postgresql://")
+        url = normalized
+
+    logger.info("Using DATABASE_URL=%s", url)
+    return url
+
+DATABASE_URL = _resolve_database_url()
+
+# Create engine with appropriate connect_args for SQLite
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

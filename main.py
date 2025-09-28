@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import List, Optional
+import os
 import uvicorn
 import logging
 from datetime import datetime
@@ -44,6 +45,8 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "https://glowing-wisp-8918ad.netlify.app",
+        "https://glowing-wisp-8918adc.netlify.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -597,6 +600,24 @@ async def ingest_csvs(request: IngestRequest):
 # ----------------------------
 # Hybrid Recommendations
 # ----------------------------
+@app.get("/api/recommendations")
+async def recommendations_default(
+    user_id: int = Query(..., description="User ID for recommendations"),
+    limit: int = Query(10, description="Number of items to return"),
+    alpha: float = Query(0.6, ge=0.0, le=1.0, description="Weight for CF vs CBF in hybrid blend (0-1)"),
+    db: Session = Depends(get_db)
+):
+    """Default recommendations endpoint.
+    For convenience, this proxies to the hybrid recommendation engine.
+    """
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        recs = engine.get_hybrid_recommendations(user_id=user_id, limit=limit, alpha=alpha)
+        return {"user_id": user_id, "limit": limit, "alpha": alpha, "results": recs, "total": len(recs)}
+    except Exception as e:
+        logger.error(f"Default recommendation error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating recommendations")
+
 @app.get("/api/recommendations/hybrid")
 async def hybrid_recommendations(
     user_id: int = Query(..., description="User ID for hybrid recommendations"),
@@ -611,6 +632,22 @@ async def hybrid_recommendations(
     except Exception as e:
         logger.error(f"Hybrid recommendation error for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Error generating hybrid recommendations")
+
+# Backward/compatibility alias matching frontend calling '/recs'
+@app.get("/recs")
+async def recs_alias(
+    user_id: int = Query(..., description="User ID for recommendations"),
+    limit: int = Query(10, description="Number of items to return"),
+    alpha: float = Query(0.6, ge=0.0, le=1.0, description="Weight for CF vs CBF in hybrid blend (0-1)"),
+    db: Session = Depends(get_db)
+):
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        recs = engine.get_hybrid_recommendations(user_id=user_id, limit=limit, alpha=alpha)
+        return {"user_id": user_id, "limit": limit, "alpha": alpha, "results": recs, "total": len(recs)}
+    except Exception as e:
+        logger.error(f"/recs alias recommendation error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating recommendations")
 
 # ----------------------------
 # CF-only Recommendations
@@ -665,10 +702,11 @@ async def debug_hybrid(
         raise HTTPException(status_code=500, detail="Error generating hybrid debug info")
 
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         reload=True,
         workers=1,  # Use 1 worker for development
         log_level="info"
