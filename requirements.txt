@@ -11,12 +11,13 @@ passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.6
 
 # Data processing (simplified - no numpy/pandas for now)
-# pandas>=2.0.0
-# numpy>=1.20.0
-# scikit-learn>=1.0.0
+pandas>=2.0.0
+numpy>=1.20.0
+scikit-learn>=1.0.0
+scipy>=1.8.0
 
 # AI/ML (optional - for OpenAI integration)
-# openai>=1.0.0
+openai==0.28.1
 
 # HTTP requests
 requests>=2.28.0

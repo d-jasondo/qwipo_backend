@@ -6,6 +6,7 @@ import uvicorn
 import logging
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from models import (
     UserRegistration, HomepageResponse, ProductResponse, 
@@ -16,6 +17,7 @@ from recommendation_engine import EnhancedRecommendationEngine
 from ai_assistant import AIRetailAssistant
 from cache import cache
 from b2b_features import router as b2b_router
+from data_ingestion import ingest_all
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +65,7 @@ async def startup_event():
 @app.get("/api/homepage", response_model=HomepageResponse)
 async def get_homepage(
     user_id: int = Query(..., description="User ID for personalized recommendations"),
+    hybrid_alpha: Optional[float] = Query(None, ge=0.0, le=1.0, description="Optional: blend CF/CBF for personalized recommendations (0-1)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -79,6 +82,10 @@ async def get_homepage(
         logger.info(f"Getting homepage recommendations for user {user_id}")
         engine = EnhancedRecommendationEngine(db)
         recommendations = engine.get_homepage_recommendations(user_id)
+        # If hybrid_alpha provided, override personalized with hybrid
+        if hybrid_alpha is not None:
+            hybrid = engine.get_hybrid_recommendations(user_id=user_id, limit=8, alpha=hybrid_alpha)
+            recommendations["personalized_recommendations"] = hybrid
         
         logger.info(f"Successfully generated homepage recommendations for user {user_id}")
         return recommendations
@@ -86,6 +93,19 @@ async def get_homepage(
     except Exception as e:
         logger.error(f"Homepage error for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Error loading homepage recommendations")
+
+# ----------------------------
+# Admin: Cache Clear
+# ----------------------------
+@app.post("/api/admin/cache/clear")
+async def clear_cache():
+    """Clear in-memory cache (use carefully)."""
+    try:
+        cache.clear()
+        return {"status": "success", "message": "Cache cleared"}
+    except Exception as e:
+        logger.error(f"Cache clear error: {e}")
+        raise HTTPException(status_code=500, detail="Error clearing cache")
 
 # Product detail page with AI suggestions
 @app.get("/api/products/{product_id}")
@@ -505,6 +525,82 @@ async def root():
             "search": "/api/search?query=rice&user_id=1"
         }
     }
+
+# ----------------------------
+# Admin: CSV ingestion
+# ----------------------------
+class IngestRequest(BaseModel):
+    products_csv: str
+    retailers_csv: str
+    purchases_csv: str
+
+@app.post("/api/admin/ingest-csvs")
+async def ingest_csvs(request: IngestRequest):
+    """Ingest products, retailers, and purchases from CSV files."""
+    try:
+        result = ingest_all(
+            products_csv=request.products_csv,
+            retailers_csv=request.retailers_csv,
+            purchases_csv=request.purchases_csv,
+        )
+        # Invalidate caches so new data is used
+        cache.clear()
+        return {"status": "success", "ingested": result}
+    except Exception as e:
+        logger.error(f"CSV ingestion error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------
+# Hybrid Recommendations
+# ----------------------------
+@app.get("/api/recommendations/hybrid")
+async def hybrid_recommendations(
+    user_id: int = Query(..., description="User ID for hybrid recommendations"),
+    limit: int = Query(10, description="Number of items to return"),
+    alpha: float = Query(0.6, ge=0.0, le=1.0, description="Weight for CF vs CBF in hybrid blend (0-1)"),
+    db: Session = Depends(get_db)
+):
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        recs = engine.get_hybrid_recommendations(user_id=user_id, limit=limit, alpha=alpha)
+        return {"user_id": user_id, "limit": limit, "alpha": alpha, "results": recs, "total": len(recs)}
+    except Exception as e:
+        logger.error(f"Hybrid recommendation error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating hybrid recommendations")
+
+# ----------------------------
+# CF-only Recommendations
+# ----------------------------
+@app.get("/api/recommendations/cf")
+async def cf_recommendations(
+    user_id: int = Query(..., description="User ID for collaborative filtering recommendations"),
+    limit: int = Query(10, description="Number of items to return"),
+    db: Session = Depends(get_db)
+):
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        recs = engine.get_collaborative_recommendations(user_id=user_id, limit=limit)
+        return {"user_id": user_id, "limit": limit, "results": recs, "total": len(recs)}
+    except Exception as e:
+        logger.error(f"CF recommendation error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating CF recommendations")
+
+# ----------------------------
+# CBF-only Recommendations
+# ----------------------------
+@app.get("/api/recommendations/cbf")
+async def cbf_recommendations(
+    product_id: int = Query(..., description="Anchor product ID for content-based recommendations"),
+    limit: int = Query(10, description="Number of items to return"),
+    db: Session = Depends(get_db)
+):
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        recs = engine.get_content_based_recommendations(product_id=product_id, limit=limit)
+        return {"product_id": product_id, "limit": limit, "results": recs, "total": len(recs)}
+    except Exception as e:
+        logger.error(f"CBF recommendation error for product {product_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating CBF recommendations")
 
 if __name__ == "__main__":
     uvicorn.run(

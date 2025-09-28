@@ -79,6 +79,12 @@ GET /api/homepage?user_id=1
 ```
 Returns personalized homepage with recommendations, deals, and trending products.
 
+Optional hybrid blend for personalized section:
+```http
+GET /api/homepage?user_id=1&hybrid_alpha=0.6
+```
+When `hybrid_alpha` (0–1) is provided, the `personalized_recommendations` section is generated using the hybrid recommender (CF/CBF blend). Higher values weight CF more.
+
 ### AI Retail Assistant
 ```http
 POST /api/ai-assistant
@@ -106,6 +112,41 @@ GET /api/search?query=rice&user_id=1&category=grains&min_price=50&max_price=200
 GET /api/deals?user_id=1&deal_type=daily
 ```
 
+### Data Ingestion (CSV)
+```http
+POST /api/admin/ingest-csvs
+Content-Type: application/json
+
+{
+  "products_csv": "c:\\Users\\dell\\Downloads\\10486b20.csv",
+  "retailers_csv": "c:\\Users\\dell\\Downloads\\a65edb4c.csv",
+  "purchases_csv": "c:\\Users\\dell\\Downloads\\efd472e8.csv"
+}
+```
+Ingests products, retailers, and purchases into the database. Clears cache automatically.
+
+### Admin: Cache
+```http
+POST /api/admin/cache/clear
+```
+Clears in-memory caches (use after bulk updates or ingestion if needed).
+
+### Recommendations API (CF / CBF / Hybrid)
+CF-only (item-based collaborative filtering):
+```http
+GET /api/recommendations/cf?user_id=89&limit=10
+```
+
+CBF-only (content-based using TF-IDF over product attributes):
+```http
+GET /api/recommendations/cbf?product_id=1&limit=10
+```
+
+Hybrid (blend of CF and CBF):
+```http
+GET /api/recommendations/hybrid?user_id=89&limit=10&alpha=0.6
+```
+Where `alpha` controls CF weight (0–1). Lower alpha emphasizes CBF, higher alpha emphasizes CF.
 ### User Registration
 ```http
 POST /api/register

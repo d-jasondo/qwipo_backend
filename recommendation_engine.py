@@ -8,6 +8,10 @@ from typing import List, Dict, Any
 import logging
 from cache import cache
 import json
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,6 +19,9 @@ logger = logging.getLogger(__name__)
 class EnhancedRecommendationEngine:
     def __init__(self, db: Session):
         self.db = db
+        # cache keys for computed matrices
+        self._cbf_cache_key = "cbf_matrix_v1"
+        self._cf_cache_key = "cf_item_sim_v1"
     
     def get_homepage_recommendations(self, user_id: int) -> Dict[str, Any]:
         """Get all recommendations for homepage based on your design"""
@@ -384,3 +391,143 @@ class EnhancedRecommendationEngine:
             "low_stock_alerts": [],
             "seasonal_deals": self.get_seasonal_deals()
         }
+
+    # ----------------------------
+    # Content-Based Filtering (CBF)
+    # ----------------------------
+    def _build_cbf_matrix(self):
+        """Build TF-IDF matrix for products using textual attributes."""
+        cached = cache.get(self._cbf_cache_key)
+        if cached:
+            return cached
+        query = text(
+            """
+            SELECT id, name, category, COALESCE(subcategory, ''), COALESCE(brand, ''), COALESCE(description, '')
+            FROM products
+            WHERE is_active = 1
+            """
+        )
+        rows = self.db.execute(query).fetchall()
+        if not rows:
+            return None
+        df = pd.DataFrame(rows, columns=["id", "name", "category", "subcategory", "brand", "description"])
+        df["text"] = (
+            df["name"].astype(str) + " " +
+            df["category"].astype(str) + " " +
+            df["subcategory"].astype(str) + " " +
+            df["brand"].astype(str) + " " +
+            df["description"].astype(str)
+        )
+        tfidf = TfidfVectorizer(stop_words="english")
+        matrix = tfidf.fit_transform(df["text"].fillna(""))
+        result = {"df": df, "matrix": matrix, "tfidf": tfidf}
+        cache.set(self._cbf_cache_key, result, 3600)
+        return result
+
+    def get_content_based_recommendations(self, product_id: int, limit: int = 10) -> List[Dict]:
+        """Products similar to given product via TF-IDF cosine similarity."""
+        data = self._build_cbf_matrix()
+        if not data:
+            return []
+        df = data["df"]
+        matrix = data["matrix"]
+        # find index of product
+        idx_list = df.index[df["id"] == product_id].tolist()
+        if not idx_list:
+            return []
+        idx = idx_list[0]
+        sims = cosine_similarity(matrix[idx], matrix).ravel()
+        df = df.copy()
+        df["score"] = sims
+        top_ids = df[df["id"] != product_id].nlargest(limit, "score")["id"].tolist()
+        if not top_ids:
+            return []
+        ids_csv = ",".join(str(i) for i in top_ids)
+        res = self.db.execute(text(f"SELECT * FROM products WHERE id IN ({ids_csv})"))
+        return self._format_products(res)
+
+    # ----------------------------
+    # Collaborative Filtering (Item-based)
+    # ----------------------------
+    def _build_cf_item_similarity(self):
+        cached = cache.get(self._cf_cache_key)
+        if cached:
+            return cached
+        q = text(
+            """
+            SELECT user_id, product_id, SUM(quantity) as qty
+            FROM purchase_history
+            GROUP BY user_id, product_id
+            """
+        )
+        rows = self.db.execute(q).fetchall()
+        if not rows:
+            return None
+        df = pd.DataFrame(rows, columns=["user_id", "product_id", "qty"])
+        pivot = df.pivot_table(index="user_id", columns="product_id", values="qty", fill_value=0)
+        if pivot.shape[1] == 0:
+            return None
+        item_sim = cosine_similarity(pivot.T)
+        item_ids = list(pivot.columns)
+        result = {"item_sim": item_sim, "item_ids": item_ids, "pivot": pivot}
+        cache.set(self._cf_cache_key, result, 1800)
+        return result
+
+    def get_collaborative_recommendations(self, user_id: int, limit: int = 10) -> List[Dict]:
+        data = self._build_cf_item_similarity()
+        if not data:
+            return self.get_popular_products(limit)
+        item_sim = data["item_sim"]
+        item_ids = data["item_ids"]
+        pivot = data["pivot"]
+        if user_id not in pivot.index:
+            return self.get_popular_products(limit)
+        user_vector = pivot.loc[user_id].values
+        scores = user_vector @ item_sim
+        # Exclude already purchased items
+        already_idxs = np.where(user_vector > 0)[0]
+        scores[already_idxs] = -np.inf
+        top_idx = np.argsort(scores)[::-1][:limit]
+        rec_ids = [item_ids[i] for i in top_idx if np.isfinite(scores[i])]
+        if not rec_ids:
+            return self.get_popular_products(limit)
+        ids_csv = ",".join(str(i) for i in rec_ids)
+        res = self.db.execute(text(f"SELECT * FROM products WHERE id IN ({ids_csv})"))
+        return self._format_products(res)
+
+    # ----------------------------
+    # Hybrid (CBF + CF)
+    # ----------------------------
+    def get_hybrid_recommendations(self, user_id: int, limit: int = 10, alpha: float = 0.6) -> List[Dict]:
+        """Blend CF and CBF scores. alpha weights CF; (1-alpha) weights CBF."""
+        # CF candidates
+        cf_list = self.get_collaborative_recommendations(user_id, limit=50)
+        cf_rank = {p["id"]: (len(cf_list) - i) / max(1, len(cf_list)) for i, p in enumerate(cf_list)} if cf_list else {}
+        # Seed products from user's recent purchases for CBF expansion
+        seed_q = text(
+            """
+            SELECT product_id FROM purchase_history
+            WHERE user_id = :uid
+            ORDER BY purchased_at DESC
+            LIMIT 5
+            """
+        )
+        seeds = [r[0] for r in self.db.execute(seed_q, {"uid": user_id}).fetchall()]
+        cbf_scores: Dict[int, float] = {}
+        for pid in seeds:
+            sims = self.get_content_based_recommendations(pid, limit=50)
+            for rank, p in enumerate(sims):
+                cbf_scores[p["id"]] = max(cbf_scores.get(p["id"], 0.0), (50 - rank) / 50)
+        # Blend scores
+        all_ids = set(cbf_scores.keys()) | set(cf_rank.keys())
+        blended = []
+        for pid in all_ids:
+            score = alpha * cf_rank.get(pid, 0.0) + (1 - alpha) * cbf_scores.get(pid, 0.0)
+            blended.append((pid, score))
+        blended.sort(key=lambda x: x[1], reverse=True)
+        rec_ids = [pid for pid, _ in blended[:limit]]
+        if not rec_ids:
+            return self.get_popular_products(limit)
+        ids_csv = ",".join(str(i) for i in rec_ids)
+        res = self.db.execute(text(f"SELECT * FROM products WHERE id IN ({ids_csv})"))
+        return self._format_products(res)
