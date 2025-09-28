@@ -1,6 +1,6 @@
 # FastAPI and web framework
-fastapi>=0.100.0
-uvicorn>=0.20.0
+fastapi>=0.103.0
+uvicorn>=0.22.0
 gunicorn>=21.2.0
 
 # Database
@@ -10,11 +10,11 @@ sqlalchemy>=2.0.0
 passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.6
 
-# Data processing (simplified - no numpy/pandas for now)
-pandas>=2.0.0
-numpy>=1.20.0
-scikit-learn>=1.0.0
-scipy>=1.8.0
+# Data processing (pin to Python 3.11 compatible versions)
+pandas==2.1.4
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.3.2
 
 # AI/ML (optional - for OpenAI integration)
 openai==0.28.1
