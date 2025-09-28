@@ -1,0 +1,16 @@
+# Normalize all text files to LF in the repo
+* text=auto eol=lf
+
+# Ensure critical files use LF (Linux-friendly)
+Dockerfile text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf

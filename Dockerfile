@@ -31,4 +31,4 @@ ENV PORT=8000 \
 EXPOSE 8000
 
 # Start with Gunicorn + Uvicorn worker (bind to PORT env var)
-CMD ["bash", "-lc", "gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8000} --timeout 120"]
+CMD ["bash", "-lc", "gunicorn main:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8000} --timeout 180"]
