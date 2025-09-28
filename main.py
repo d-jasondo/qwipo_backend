@@ -474,16 +474,60 @@ async def get_categories(db: Session = Depends(get_db)):
         """)
         
         result = db.execute(query)
-        categories = [{"name": row[0], "product_count": row[1]} for row in result.fetchall()]
-        
-        return {
-            "categories": categories,
-            "total_categories": len(categories)
-        }
+        # Frontend expects an array of strings
+        categories = [row[0] for row in result.fetchall() if row[0]]
+        return categories
         
     except Exception as e:
         logger.error(f"Error getting categories: {e}")
         raise HTTPException(status_code=500, detail="Error loading categories")
+
+# List products (for frontend compatibility)
+@app.get("/api/products")
+async def list_products(
+    category: Optional[str] = Query(None, description="Category filter"),
+    search: Optional[str] = Query(None, description="Search term"),
+    limit: int = Query(100, description="Max items to return"),
+    db: Session = Depends(get_db)
+):
+    try:
+        conditions = ["p.is_active = 1"]
+        params = {"limit": limit}
+        if search:
+            conditions.append("(p.name LIKE :search OR p.description LIKE :search OR p.category LIKE :search)")
+            params["search"] = f"%{search}%"
+        if category:
+            conditions.append("p.category = :category")
+            params["category"] = category
+        where_clause = " AND ".join(conditions)
+        q = text(f"""
+            SELECT p.*, COUNT(ph.id) as popularity
+            FROM products p
+            LEFT JOIN purchase_history ph ON p.id = ph.product_id
+            WHERE {where_clause}
+            GROUP BY p.id
+            ORDER BY popularity DESC, p.created_at DESC
+            LIMIT :limit
+        """)
+        result = db.execute(q, params)
+        engine = EnhancedRecommendationEngine(db)
+        return engine._format_products(result)
+    except Exception as e:
+        logger.error(f"Error listing products: {e}")
+        raise HTTPException(status_code=500, detail="Error loading products")
+
+# Featured products (for frontend compatibility)
+@app.get("/api/featured-products")
+async def featured_products(
+    limit: int = Query(20, description="Max items to return"),
+    db: Session = Depends(get_db)
+):
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        return engine.get_popular_products(limit)
+    except Exception as e:
+        logger.error(f"Error getting featured products: {e}")
+        raise HTTPException(status_code=500, detail="Error loading featured products")
 
 # Health check
 @app.get("/health")
@@ -601,6 +645,24 @@ async def cbf_recommendations(
     except Exception as e:
         logger.error(f"CBF recommendation error for product {product_id}: {e}")
         raise HTTPException(status_code=500, detail="Error generating CBF recommendations")
+
+# ----------------------------
+# Debug: Hybrid components
+# ----------------------------
+@app.get("/api/recommendations/hybrid/debug")
+async def debug_hybrid(
+    user_id: int = Query(..., description="User ID"),
+    limit: int = Query(10, description="Number of items to consider"),
+    alpha: float = Query(0.6, ge=0.0, le=1.0, description="Weight for CF vs CBF in hybrid blend (0-1)"),
+    db: Session = Depends(get_db)
+):
+    try:
+        engine = EnhancedRecommendationEngine(db)
+        data = engine.debug_hybrid_components(user_id=user_id, limit=limit, alpha=alpha)
+        return data
+    except Exception as e:
+        logger.error(f"Hybrid debug error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating hybrid debug info")
 
 if __name__ == "__main__":
     uvicorn.run(

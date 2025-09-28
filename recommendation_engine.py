@@ -12,6 +12,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import pandas as pd
 import numpy as np
+import hashlib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -481,7 +482,8 @@ class EnhancedRecommendationEngine:
         item_ids = data["item_ids"]
         pivot = data["pivot"]
         if user_id not in pivot.index:
-            return self.get_popular_products(limit)
+            # No CF signal for this user; return empty to let hybrid rely on CBF or other strategies
+            return []
         user_vector = pivot.loc[user_id].values
         scores = user_vector @ item_sim
         # Exclude already purchased items
@@ -513,16 +515,66 @@ class EnhancedRecommendationEngine:
             """
         )
         seeds = [r[0] for r in self.db.execute(seed_q, {"uid": user_id}).fetchall()]
+        # If no seeds from purchase history, fallback to personalized/trending anchors by user's city/business
+        if not seeds:
+            try:
+                user_meta = self.db.execute(text("SELECT business_type, city FROM users WHERE id = :uid"), {"uid": user_id}).fetchone()
+                if user_meta:
+                    business_type, city = user_meta
+                    # Try trending in user's city (last 7 days)
+                    trend_q = text(
+                        """
+                        SELECT p.id, COUNT(ph.id) as cnt
+                        FROM products p
+                        JOIN purchase_history ph ON p.id = ph.product_id
+                        JOIN users u ON ph.user_id = u.id
+                        WHERE ph.purchased_at >= datetime('now', '-7 days')
+                        AND u.city = :city AND p.is_active = 1
+                        GROUP BY p.id
+                        ORDER BY cnt DESC
+                        LIMIT 5
+                        """
+                    )
+                    seeds = [r[0] for r in self.db.execute(trend_q, {"city": city}).fetchall()]
+                    # If still empty, use similar business_type over 30 days
+                    if not seeds and business_type:
+                        bt_q = text(
+                            """
+                            SELECT p.id, COUNT(ph.id) as cnt
+                            FROM products p
+                            JOIN purchase_history ph ON p.id = ph.product_id
+                            JOIN users u ON ph.user_id = u.id
+                            WHERE ph.purchased_at >= datetime('now', '-30 days')
+                            AND u.business_type = :bt AND p.is_active = 1
+                            GROUP BY p.id
+                            ORDER BY cnt DESC
+                            LIMIT 5
+                            """
+                        )
+                        seeds = [r[0] for r in self.db.execute(bt_q, {"bt": business_type}).fetchall()]
+            except Exception as se:
+                logger.warning(f"Hybrid seed fallback failed: {se}")
         cbf_scores: Dict[int, float] = {}
         for pid in seeds:
             sims = self.get_content_based_recommendations(pid, limit=50)
             for rank, p in enumerate(sims):
                 cbf_scores[p["id"]] = max(cbf_scores.get(p["id"], 0.0), (50 - rank) / 50)
+        # Gather user's previously purchased product IDs to exclude from final results
+        purchased_ids = set(
+            pid for (pid,) in self.db.execute(
+                text("SELECT DISTINCT product_id FROM purchase_history WHERE user_id = :uid"),
+                {"uid": user_id}
+            ).fetchall()
+        )
         # Blend scores
-        all_ids = set(cbf_scores.keys()) | set(cf_rank.keys())
+        all_ids = (set(cbf_scores.keys()) | set(cf_rank.keys())) - purchased_ids
         blended = []
         for pid in all_ids:
-            score = alpha * cf_rank.get(pid, 0.0) + (1 - alpha) * cbf_scores.get(pid, 0.0)
+            base = alpha * cf_rank.get(pid, 0.0) + (1 - alpha) * cbf_scores.get(pid, 0.0)
+            # Deterministic tiny jitter per user/item/alpha to avoid identical ordering ties across users
+            h = hashlib.md5(f"{user_id}:{pid}:{alpha}".encode()).hexdigest()
+            jitter = (int(h[:6], 16) % 1000) / 1000.0  # 0..0.999
+            score = base + 1e-4 * jitter
             blended.append((pid, score))
         blended.sort(key=lambda x: x[1], reverse=True)
         rec_ids = [pid for pid, _ in blended[:limit]]
@@ -531,3 +583,48 @@ class EnhancedRecommendationEngine:
         ids_csv = ",".join(str(i) for i in rec_ids)
         res = self.db.execute(text(f"SELECT * FROM products WHERE id IN ({ids_csv})"))
         return self._format_products(res)
+
+    # ----------------------------
+    # Debug helpers
+    # ----------------------------
+    def debug_hybrid_components(self, user_id: int, limit: int = 10, alpha: float = 0.6) -> Dict[str, Any]:
+        """Return intermediate artifacts for debugging recommendations for a user."""
+        # CF part
+        cf_list = self.get_collaborative_recommendations(user_id, limit=50)
+        cf_ids = [p["id"] for p in cf_list] if cf_list else []
+        cf_rank = {pid: (len(cf_list) - i) / max(1, len(cf_list)) for i, pid in enumerate(cf_ids)} if cf_ids else {}
+        # Seeds
+        seed_q = text(
+            """
+            SELECT product_id FROM purchase_history
+            WHERE user_id = :uid
+            ORDER BY purchased_at DESC
+            LIMIT 5
+            """
+        )
+        seeds = [r[0] for r in self.db.execute(seed_q, {"uid": user_id}).fetchall()]
+        # CBF expansion
+        cbf_scores: Dict[int, float] = {}
+        cbf_lists = {}
+        for pid in seeds:
+            sims = self.get_content_based_recommendations(pid, limit=50)
+            cbf_lists[pid] = [p["id"] for p in sims]
+            for rank, p in enumerate(sims):
+                cbf_scores[p["id"]] = max(cbf_scores.get(p["id"], 0.0), (50 - rank) / 50)
+        # Blend
+        all_ids = set(cbf_scores.keys()) | set(cf_rank.keys())
+        blended = []
+        for pid in all_ids:
+            score = alpha * cf_rank.get(pid, 0.0) + (1 - alpha) * cbf_scores.get(pid, 0.0)
+            blended.append((pid, score))
+        blended.sort(key=lambda x: x[1], reverse=True)
+        blended_ids = [pid for pid, _ in blended[:limit]]
+        return {
+            "user_id": user_id,
+            "alpha": alpha,
+            "cf_ids": cf_ids,
+            "seeds": seeds,
+            "cbf_score_count": len(cbf_scores),
+            "cbf_by_seed": cbf_lists,
+            "blended_ids": blended_ids,
+        }
